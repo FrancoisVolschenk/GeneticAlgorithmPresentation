@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Genetic Programming Demo (Depth Penalty + Live Chart)</title>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <style>
+    body { font-family: sans-serif; background: #fafafa; padding: 20px; }
+    textarea { width: 100%; height: 100px; }
+    pre { background: #eee; padding: 10px; border-radius: 8px; }
+    #tree, #chart { border: 1px solid #ccc; background: white; }
+    #layout { display: flex; gap: 20px; flex-wrap: wrap; }
+    #status { margin-top: 10px; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h2>Genetic Programming Demo (Depth Penalty + Live Evolution)</h2>
+  <p>Enter 10 samples as: <code>x,y,target</code> (one per line)</p>
+  <textarea id="samples"></textarea><br>
+  <button id="run">Start Evolution</button>
+  <div id="status"></div>
+  <pre id="output"></pre>
+
+  <div id="layout">
+    <svg id="tree" width="600" height="500"></svg>
+    <svg id="chart" width="500" height="500"></svg>
+  </div>
+
+<script>
+
+function randomChoice(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+
+const OPERATORS = ['+', '-', '*'];
+const TERMINALS = ['x', 'y'];
+
+function randomConst() { return Math.floor(Math.random() * 101); }
+
+function randomExpr(depth = 0, maxDepth = 3) {
+  if (depth >= maxDepth || Math.random() < 0.3) {
+    const choice = Math.random();
+
+    if (choice < 0.33) {
+      return { type: 'const', value: randomConst() };
+    }
+
+    if (choice < 0.66) {
+      return { type: 'var', value: 'x' };
+    }
+
+    return ({ type: 'var', value: 'y' });
+
+  } else {
+    const op = randomChoice(OPERATORS);
+
+    return ({ type: 'op', op, left: randomExpr(depth+1, maxDepth), right: randomExpr(depth+1, maxDepth) });
+  }
+}
+
+function evalExpr(expr, vars) {
+  switch (expr.type) {
+    case 'const': {
+      return expr.value;
+    }
+
+    case 'var': {
+      return vars[expr.value];
+    }
+
+    case 'op':{
+      const l = evalExpr(expr.left, vars);
+      const r = evalExpr(expr.right, vars);
+
+      if (expr.op === '+') return (l + r);
+      if (expr.op === '-') return (l - r);
+      if (expr.op === '*') return (l * r);
+    }
+  }
+}
+
+function exprToString(expr) {
+  if (expr.type === 'const' || expr.type === 'var') {
+    return (String(expr.value));
+  }
+
+  return (`(${exprToString(expr.left)} ${expr.op} ${exprToString(expr.right)})`);
+}
+
+function clone(expr) { return (JSON.parse(JSON.stringify(expr))); }
+
+function mutate(expr, rate=0.1) {
+  if (Math.random() < rate) {
+    return randomExpr();
+  }
+
+  if (expr.type === 'op') {
+    expr.left = mutate(expr.left, rate);
+    expr.right = mutate(expr.right, rate);
+  }
+
+  return expr;
+}
+
+function crossover(a, b) {
+  if (Math.random() < 0.5 && a.type === 'op' && b.type === 'op') {
+    const child = clone(a);
+
+    if (Math.random() < 0.5) {
+      child.left = clone(b.left);
+    }
+    else {
+      child.right = clone(b.right);
+    }
+
+    return child;
+  }
+
+  return (Math.random() < 0.5 ? clone(a) : clone(b));
+}
+
+// --- Tree depth calculation ---
+function treeDepth(expr) {
+  if (expr.type !== 'op') {
+    return 1;
+  }
+
+  return (1 + Math.max(treeDepth(expr.left), treeDepth(expr.right)));
+}
+
+// --- Fitness with depth penalty ---
+function fitness(expr, samples, penaltyWeight = 0.1) {
+  let score = 0;
+
+  for (const s of samples) {
+    try {
+      const val = evalExpr(expr, {x: s.x, y: s.y});
+      if (Math.abs(val - s.target) < 0.01) {
+        score++;
+      }
+
+    } catch {}
+
+  }
+  const depth = treeDepth(expr);
+  const penalty = penaltyWeight * Math.max(0, depth - 3);
+
+  return (score - penalty);
+}
+
+function tournament(pop, k) {
+  const competitors = [];
+
+  for (let i=0; i<k; i++) {
+    competitors.push(randomChoice(pop));
+  }
+
+  competitors.sort((a, b) => b.fit - a.fit);
+
+  return (competitors[0]);
+}
+
+// === D3 Tree Visualization ===
+function drawTree(expr) {
+  const svg = d3.select("#tree");
+  svg.selectAll("*").remove();
+
+  const width = +svg.attr("width");
+  const height = +svg.attr("height");
+
+  function toHierarchy(expr) {
+    if (expr.type === 'op') {
+      return { name: expr.op, children: [toHierarchy(expr.left), toHierarchy(expr.right)] };
+    } else {
+      return { name: String(expr.value) };
+    }
+  }
+
+  const root = d3.hierarchy(toHierarchy(expr));
+  const treeLayout = d3.tree().size([width - 100, height - 100]);
+  treeLayout(root);
+
+  const g = svg.append("g").attr("transform", "translate(50,50)");
+
+  g.selectAll(".link")
+    .data(root.links())
+    .enter()
+    .append("line")
+    .attr("x1", d => d.source.x)
+    .attr("y1", d => d.source.y)
+    .attr("x2", d => d.target.x)
+    .attr("y2", d => d.target.y)
+    .attr("stroke", "#999")
+    .attr("stroke-width", 2);
+
+  const node = g.selectAll(".node")
+    .data(root.descendants())
+    .enter()
+    .append("g")
+    .attr("transform", d => `translate(${d.x},${d.y})`);
+
+  node.append("circle")
+    .attr("r", 18)
+    .attr("fill", d => d.children ? "#69b3a2" : "#ffd166")
+    .attr("stroke", "#333");
+
+  node.append("text")
+    .text(d => d.data.name)
+    .attr("dy", 5)
+    .attr("text-anchor", "middle")
+    .style("font-weight", "bold")
+    .style("font-size", "14px");
+}
+
+// === D3 Chart ===
+function initChart(maxFitness) {
+  const svg = d3.select("#chart");
+  svg.selectAll("*").remove();
+
+  const width = +svg.attr("width");
+  const height = +svg.attr("height");
+  const margin = {top: 30, right: 20, bottom: 40, left: 50};
+  const plotWidth = width - margin.left - margin.right;
+  const plotHeight = height - margin.top - margin.bottom;
+
+  const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
+  const x = d3.scaleLinear().domain([0, 1]).range([0, plotWidth]);
+  const y = d3.scaleLinear().domain([0, maxFitness]).range([plotHeight, 0]);
+
+  g.append("g").attr("transform", `translate(0,${plotHeight})`).attr("class", "x-axis");
+  g.append("g").attr("class", "y-axis");
+
+  g.append("text")
+    .attr("x", plotWidth/2)
+    .attr("y", plotHeight + 35)
+    .attr("text-anchor", "middle")
+    .text("Generation");
+  g.append("text")
+    .attr("x", -plotHeight/2)
+    .attr("y", -35)
+    .attr("transform", "rotate(-90)")
+    .attr("text-anchor", "middle")
+    .text("Fitness");
+
+  const bestLine = g.append("path").attr("stroke", "green").attr("stroke-width", 2).attr("fill", "none");
+  const avgLine = g.append("path").attr("stroke", "blue").attr("stroke-width", 2).attr("fill", "none").style("opacity", 0.7);
+
+  return { g, x, y, plotWidth, plotHeight, bestLine, avgLine };
+}
+
+function updateChart(chart, data) {
+  const { g, x, y, plotWidth, plotHeight, bestLine, avgLine } = chart;
+  const genCount = data.length;
+  x.domain([0, genCount]);
+  g.select(".x-axis").call(d3.axisBottom(x));
+  g.select(".y-axis").call(d3.axisLeft(y).ticks(10));
+
+  const lineBest = d3.line().x((d, i) => x(i)).y(d => y(d.best));
+  const lineAvg = d3.line().x((d, i) => x(i)).y(d => y(d.avg));
+
+  bestLine.datum(data).attr("d", lineBest);
+  avgLine.datum(data).attr("d", lineAvg);
+}
+
+async function evolve(samples) {
+  const popSize = 200;
+  const pause = 15;
+  const maxFitness = samples.length;
+  const mutation_rate = 0.2
+
+  let population = Array.from({length: popSize}, () => randomExpr());
+  let generation = 0;
+  let history = [];
+  const chart = initChart(maxFitness);
+
+  while (true) {
+    population = population.map(ind => ({expr: ind, fit: fitness(ind, samples)}));
+    population.sort((a, b) => b.fit - a.fit);
+
+    const best = population[0];
+    const avgFit = population.reduce((acc, p) => acc + p.fit, 0) / popSize;
+
+    history.push({ best: best.fit, avg: avgFit });
+    updateChart(chart, history);
+
+    document.getElementById("status").textContent =
+      `Generation ${generation} | Best: ${best.fit.toFixed(2)} | Avg: ${avgFit.toFixed(2)} | Depth: ${treeDepth(best.expr)}`;
+    document.getElementById("output").textContent =
+      `Best formula:\n${exprToString(best.expr)}\nDepth: ${treeDepth(best.expr)}\nFitness: ${best.fit.toFixed(2)}`;
+    drawTree(best.expr);
+
+    if (best.fit >= maxFitness) {
+      document.getElementById("status").textContent += " 🎉 Perfect solution found!";
+      break;
+    }
+
+    const newPop = [population[0].expr, population[1].expr];
+    while (newPop.length < popSize) {
+      const parent1 = tournament(population, 3).expr;
+      const parent2 = tournament(population, 3).expr;
+      let child = crossover(clone(parent1), clone(parent2));
+      child = mutate(child, mutation_rate);
+      newPop.push(child);
+    }
+
+    population = newPop;
+    generation++;
+    await new Promise(r => setTimeout(r, pause));
+  }
+}
+
+// === UI ===
+document.getElementById("run").onclick = async () => {
+  const samplesInput = document.getElementById("samples").value.trim().split("\n");
+  if (samplesInput.length < 1) return alert("Please enter at least one sample!");
+  const samples = samplesInput.map(line => {
+    const [x, y, target] = line.split(",").map(Number);
+    return {x, y, target};
+  });
+  document.getElementById("status").textContent = "Starting evolution...";
+  document.getElementById("output").textContent = "";
+  drawTree({type: "const", value: "..."});
+  await evolve(samples);
+};
+</script>
+</body>
+</html>
